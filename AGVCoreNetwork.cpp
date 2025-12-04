@@ -119,12 +119,6 @@ void AGVCoreNetwork::setupWiFi() {
 }
 
 void AGVCoreNetwork::startAPMode() {
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(1000)) != pdPASS) return;
-  
-  cleanupServer();
-  cleanupWebSocket();
-  cleanupDNSServer();
-  
   Serial.println("\n[AGVNET] 📡 Starting Access Point Mode");
   
   WiFi.mode(WIFI_AP);
@@ -135,29 +129,39 @@ void AGVCoreNetwork::startAPMode() {
   Serial.println("[AGVNET] Connect to '" + String(ap_ssid) + "' network");
   Serial.println("[AGVNET] Open any browser for setup wizard");
   
+  delay(100); // Give AP time to start
+  
   // Create DNS server for captive portal
   dnsServer = new DNSServer();
   dnsServer->start(53, "*", WiFi.softAPIP());
   
   isAPMode = true;
   
-  // Setup web server
+  // Setup web server - CRITICAL ORDER FOR CAPTIVE PORTAL
   server = new WebServer(80);
-  setupRoutes();
-  server->begin();
   
-  xSemaphoreGive(mutex);
+  // Setup routes for AP mode - IMPORTANT ORDER (onNotFound FIRST!)
+  server->onNotFound([this](){ this->handleNotFound(); });
+  server->on("/", HTTP_GET, [this](){ this->handleRootRedirect(); });
+  server->on("/setup", HTTP_GET, [this](){ this->handleWiFiSetup(); });
+  server->on("/scan", HTTP_GET, [this](){ this->handleScan(); });
+  server->on("/savewifi", HTTP_POST, [this](){ this->handleSaveWiFi(); });
+  
+  // Common captive portal detection URLs
+  server->on("/generate_204", HTTP_GET, [this](){ this->handleRootRedirect(); });
+  server->on("/fwlink", HTTP_GET, [this](){ this->handleRootRedirect(); });
+  server->on("/redirect", HTTP_GET, [this](){ this->handleRootRedirect(); });
+  server->on("/hotspot-detect.html", HTTP_GET, [this](){ this->handleRootRedirect(); });
+  server->on("/connectivity-check.html", HTTP_GET, [this](){ this->handleRootRedirect(); });
+  server->on("/check_network_status.txt", HTTP_GET, [this](){ this->handleRootRedirect(); });
+  server->on("/ncsi.txt", HTTP_GET, [this](){ this->handleRootRedirect(); });
+  
+  server->begin();
   Serial.println("[AGVNET] ✅ AP Mode Web Server Started");
-  Serial.println("[AGVNET] ✅ Captive portal enabled");
+  Serial.println("[AGVNET] ✅ Captive portal enabled - all requests redirected to setup");
 }
 
 void AGVCoreNetwork::startStationMode() {
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(1000)) != pdPASS) return;
-  
-  cleanupServer();
-  cleanupWebSocket();
-  cleanupDNSServer();
-  
   Serial.println("\n[AGVNET] 🌐 Starting Station Mode");
   
   WiFi.mode(WIFI_STA);
@@ -193,12 +197,10 @@ void AGVCoreNetwork::startStationMode() {
     setupRoutes();
     server->begin();
     
-    xSemaphoreGive(mutex);
     Serial.println("[AGVNET] ✅ Station Mode Web Server Started");
     Serial.println("[AGVNET] ✅ WebSocket Server Started (Port 81)");
     
   } else {
-    xSemaphoreGive(mutex);
     Serial.println("\n[AGVNET] ❌ WiFi connection failed");
     Serial.println("[AGVNET] Falling back to AP mode...");
     startAPMode();
@@ -209,21 +211,8 @@ void AGVCoreNetwork::setupRoutes() {
   if (!server) return;
   
   if (isAPMode) {
-    // AP Mode routes (setup wizard)
-    server->onNotFound([this](){ this->handleNotFound(); });
-    server->on("/", HTTP_GET, [this](){ this->handleRootRedirect(); });
-    server->on("/setup", HTTP_GET, [this](){ this->handleWiFiSetup(); });
-    server->on("/scan", HTTP_GET, [this](){ this->handleScan(); });
-    server->on("/savewifi", HTTP_POST, [this](){ this->handleSaveWiFi(); });
-    
-    // Common captive portal detection URLs
-    server->on("/generate_204", HTTP_GET, [this](){ this->handleRootRedirect(); });
-    server->on("/fwlink", HTTP_GET, [this](){ this->handleRootRedirect(); });
-    server->on("/redirect", HTTP_GET, [this](){ this->handleRootRedirect(); });
-    server->on("/hotspot-detect.html", HTTP_GET, [this](){ this->handleRootRedirect(); });
-    server->on("/connectivity-check.html", HTTP_GET, [this](){ this->handleRootRedirect(); });
-    server->on("/check_network_status.txt", HTTP_GET, [this](){ this->handleRootRedirect(); });
-    server->on("/ncsi.txt", HTTP_GET, [this](){ this->handleRootRedirect(); });
+    // This should never be called in AP mode - routes are set in startAPMode()
+    return;
   } else {
     // Station Mode routes (control interface)
     server->on("/", HTTP_GET, [this](){ this->handleRoot(); });
@@ -237,29 +226,22 @@ void AGVCoreNetwork::core0Task(void *parameter) {
   Serial.println("[CORE0] AGV Network task started on Core 0");
   
   while(1) {
-    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) == pdPASS) {
-      // Handle AP mode DNS requests
-      if (isAPMode && dnsServer) {
-        dnsServer->processNextRequest();
-      }
-      
-      // Handle web server requests
-      if (server) {
-        server->handleClient();
-      }
-      
-      // Handle WebSocket and serial input in station mode
-      if (!isAPMode) {
-        if (webSocket) {
-          webSocket->loop();
-        }
-        processSerialInput();
-      }
-      
-      xSemaphoreGive(mutex);
+    if (isAPMode && dnsServer) {
+      dnsServer->processNextRequest();
     }
     
-    delay(10);
+    if (server) {
+      server->handleClient();
+    }
+    
+    if (!isAPMode) {
+      if (webSocket) {
+        webSocket->loop();
+      }
+      processSerialInput();
+    }
+    
+    delay(1);  // Short delay for responsiveness
   }
 }
 
@@ -286,8 +268,11 @@ void AGVCoreNetwork::processSerialInput() {
             priority = 1;
           }
           
-          // Process command
-          processCommand(serialBuffer, 1); // source=1 (serial)
+          // Process command with mutex protection
+          if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) == pdPASS) {
+            processCommandUnsafe(serialBuffer, 1); // source=1 (serial)
+            xSemaphoreGive(mutex);
+          }
           
           // Echo back to serial
           Serial.printf("[SERIAL] Executed: %s\n", serialBuffer);
@@ -319,9 +304,8 @@ String AGVCoreNetwork::getSessionToken() {
   return token;
 }
 
-void AGVCoreNetwork::processCommand(const char* cmd, uint8_t source) {
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdPASS) return;
-  
+// Command processing without mutex (called from within mutex-protected context)
+void AGVCoreNetwork::processCommandUnsafe(const char* cmd, uint8_t source) {
   // Determine priority
   uint8_t priority = 0;
   String cmdStr = String(cmd);
@@ -334,8 +318,6 @@ void AGVCoreNetwork::processCommand(const char* cmd, uint8_t source) {
   if (commandCallback) {
     commandCallback(cmd, source, priority);
   }
-  
-  xSemaphoreGive(mutex);
 }
 
 // WebSocket event handler - FIXED IMPLEMENTATION
@@ -366,7 +348,7 @@ void AGVCoreNetwork::webSocketEvent(uint8_t num, WStype_t type, uint8_t * payloa
         Serial.printf("\n[WS] Command received from client #%u: '%s'\n", num, cmd);
         
         // Process command immediately
-        processCommand(cmd, 0);  // 0 = WebSocket source
+        processCommandUnsafe(cmd, 0);  // 0 = WebSocket source
         
         // Echo back to sender
         if (webSocket) {
@@ -384,27 +366,23 @@ void AGVCoreNetwork::webSocketEvent(uint8_t num, WStype_t type, uint8_t * payloa
   xSemaphoreGive(mutex);
 }
 
-// Web route handlers (THREAD SAFE)
+// Web route handlers (SPECIAL HANDLING FOR AP MODE)
 void AGVCoreNetwork::handleRoot() {
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdPASS) return;
-  
   if (isAPMode) {
+    // In AP mode, no mutex protection needed for redirect
     server->sendHeader("Location", "/setup", true);
     server->send(302, "text/plain", "");
   } else {
+    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdPASS) return;
     server->send_P(200, "text/html", loginPage);
+    xSemaphoreGive(mutex);
   }
-  
-  xSemaphoreGive(mutex);
 }
 
 void AGVCoreNetwork::handleRootRedirect() {
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdPASS) return;
-  
+  // In AP mode, no mutex protection needed for redirect
   server->sendHeader("Location", "/setup", true);
   server->send(302, "text/plain", "");
-  
-  xSemaphoreGive(mutex);
 }
 
 void AGVCoreNetwork::handleLogin() {
@@ -457,13 +435,10 @@ void AGVCoreNetwork::handleDashboard() {
 }
 
 void AGVCoreNetwork::handleWiFiSetup() {
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdPASS) return;
-  
+  // In AP mode, no mutex protection needed for page serving
   if (server) {
     server->send_P(200, "text/html", wifiSetupPage);
   }
-  
-  xSemaphoreGive(mutex);
 }
 
 void AGVCoreNetwork::handleScan() {
@@ -536,13 +511,7 @@ void AGVCoreNetwork::handleSaveWiFi() {
 }
 
 void AGVCoreNetwork::handleCaptivePortal() {
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdPASS) return;
-  
-  if (!server) {
-    xSemaphoreGive(mutex);
-    return;
-  }
-  
+  // This should not be called directly in AP mode
   String header = "HTTP/1.1 302 Found\r\n";
   header += "Location: http://192.168.4.1/setup\r\n";
   header += "Cache-Control: no-cache\r\n";
@@ -551,20 +520,11 @@ void AGVCoreNetwork::handleCaptivePortal() {
   
   server->client().write(header.c_str(), header.length());
   server->client().stop();
-  
-  xSemaphoreGive(mutex);
 }
 
 void AGVCoreNetwork::handleNotFound() {
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdPASS) return;
-  
-  if (!server) {
-    xSemaphoreGive(mutex);
-    return;
-  }
-  
   if (isAPMode) {
-    // In AP mode, redirect everything to setup
+    // In AP mode, redirect everything to setup - NO MUTEX NEEDED
     String header = "HTTP/1.1 302 Found\r\n";
     header += "Location: http://192.168.4.1/setup\r\n";
     header += "Cache-Control: no-cache\r\n";
@@ -574,8 +534,8 @@ void AGVCoreNetwork::handleNotFound() {
     server->client().write(header.c_str(), header.length());
     server->client().stop();
   } else {
+    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdPASS) return;
     server->send(404, "text/plain", "File Not Found");
+    xSemaphoreGive(mutex);
   }
-  
-  xSemaphoreGive(mutex);
 }

@@ -95,8 +95,8 @@ private:
   void cleanupWebSocket();
   void cleanupDNSServer();
   
-  // Command processing
-  void processCommand(const char* cmd, uint8_t source);
+  // Command processing (without mutex - called from within mutex)
+  void processCommandUnsafe(const char* cmd, uint8_t source);
 };
 
 } // namespace AGVCoreNetworkLib
