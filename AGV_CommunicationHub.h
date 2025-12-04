@@ -36,6 +36,9 @@ public:
   // Send status update to all interfaces - 3 of 4 lines
   void sendStatus(const char* status);
   
+  // Emergency broadcast (bypasses normal queue)
+  void broadcastEmergency(const char* message);
+  
   // Library handles everything else automatically
   void loop(); // Called automatically in background task
 
@@ -54,8 +57,9 @@ private:
   
   bool isAPMode = false;
   const char* mdnsName;
+  const char* ap_ssid = "AGV_Controller_Setup";
+  const char* ap_password = "12345678";
   
-  QueueHandle_t commandQueue = NULL;
   CommandCallback commandCallback = NULL;
   
   // Internal methods (hidden from user)
@@ -67,6 +71,15 @@ private:
   void processSerialInput();
   String getSessionToken();
   void core0Task(void *parameter);
+  
+  // Web route handlers
+  void handleRoot();
+  void handleLogin();
+  void handleDashboard();
+  void handleWiFiSetup();
+  void handleScan();
+  void handleSaveWiFi();
+  void handleCaptivePortal();
 };
 
 #endif
