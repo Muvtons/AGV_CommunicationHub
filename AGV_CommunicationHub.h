@@ -39,7 +39,7 @@ public:
   // Emergency broadcast (bypasses normal queue)
   void broadcastEmergency(const char* message);
   
-  // WebSocket event handler - NOW PUBLIC (was private)
+  // WebSocket event handler - PUBLIC
   void handleWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
   
   // Library handles everything else automatically

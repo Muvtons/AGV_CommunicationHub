@@ -235,7 +235,7 @@ String AGV_CommunicationHub::getSessionToken() {
   return token;
 }
 
-// WebSocket event handler - NOW PROPERLY IMPLEMENTED
+// WebSocket event handler - CORRECTED FOR ESP32 WEBSOCKETS LIBRARY
 void AGV_CommunicationHub::handleWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
@@ -275,20 +275,18 @@ void AGV_CommunicationHub::handleWebSocketEvent(uint8_t num, WStype_t type, uint
         String response = "Received: " + String(cmd);
         webSocket->sendTXT(num, response);
         
-        // Broadcast to all clients except sender - FIXED: use clientCount()
+        // FIXED: Use broadcastTXT instead of trying to iterate clients
+        // This is the correct way to send to all clients in ESP32 WebSockets library
         if (webSocket) {
-          for (uint8_t i = 0; i < webSocket->clientCount(); i++) {
-            if (i != num) {
-              webSocket->sendTXT(i, String("CLIENT: ") + cmd);
-            }
-          }
+          String broadcastMsg = "CLIENT: " + String(cmd);
+          webSocket->broadcastTXT(broadcastMsg);
         }
       }
       break;
   }
 }
 
-// Web route handlers
+// Web route handlers (with null checks)
 void AGV_CommunicationHub::handleRoot() {
   if (server) {
     server->send_P(200, "text/html", loginPage);
@@ -296,28 +294,34 @@ void AGV_CommunicationHub::handleRoot() {
 }
 
 void AGV_CommunicationHub::handleLogin() {
-  if (server && server->method() == HTTP_POST) {
-    String body = server->arg("plain");
-    
-    int userStart = body.indexOf("\"username\":\"") + 12;
-    int userEnd = body.indexOf("\"", userStart);
-    String username = (userStart > 12 && userEnd > userStart) ? body.substring(userStart, userEnd) : "";
-    
-    int passStart = body.indexOf("\"password\":\"") + 12;
-    int passEnd = body.indexOf("\"", passStart);
-    String password = (passStart > 12 && passEnd > passStart) ? body.substring(passStart, passEnd) : "";
-    
-    Serial.printf("\n[AUTH] Login attempt: '%s'\n", username.c_str());
-    
-    if (username == admin_username && password == admin_password) {
-      sessionToken = getSessionToken();
-      String response = "{\"success\":true,\"token\":\"" + sessionToken + "\"}";
-      server->send(200, "application/json", response);
-      Serial.println("[AUTH] ✅ Login successful");
-    } else {
-      server->send(200, "application/json", "{\"success\":false}");
-      Serial.println("[AUTH] ❌ Login failed");
-    }
+  if (!server || server->method() != HTTP_POST) return;
+  
+  String body = server->arg("plain");
+  
+  int userStart = body.indexOf("\"username\":\"") + 12;
+  int userEnd = body.indexOf("\"", userStart);
+  String username = "";
+  if (userStart > 12 && userEnd > userStart && userEnd < body.length()) {
+    username = body.substring(userStart, userEnd);
+  }
+  
+  int passStart = body.indexOf("\"password\":\"") + 12;
+  int passEnd = body.indexOf("\"", passStart);
+  String password = "";
+  if (passStart > 12 && passEnd > passStart && passEnd < body.length()) {
+    password = body.substring(passStart, passEnd);
+  }
+  
+  Serial.printf("\n[AUTH] Login attempt: '%s'\n", username.c_str());
+  
+  if (username == admin_username && password == admin_password) {
+    sessionToken = getSessionToken();
+    String response = "{\"success\":true,\"token\":\"" + sessionToken + "\"}";
+    server->send(200, "application/json", response);
+    Serial.println("[AUTH] ✅ Login successful");
+  } else {
+    server->send(200, "application/json", "{\"success\":false}");
+    Serial.println("[AUTH] ❌ Login failed");
   }
 }
 
@@ -361,11 +365,17 @@ void AGV_CommunicationHub::handleSaveWiFi() {
   
   int ssidStart = body.indexOf("\"ssid\":\"") + 8;
   int ssidEnd = body.indexOf("\"", ssidStart);
-  String ssid = (ssidStart > 8 && ssidEnd > ssidStart) ? body.substring(ssidStart, ssidEnd) : "";
+  String ssid = "";
+  if (ssidStart > 8 && ssidEnd > ssidStart && ssidEnd < body.length()) {
+    ssid = body.substring(ssidStart, ssidEnd);
+  }
   
   int passStart = body.indexOf("\"password\":\"") + 12;
   int passEnd = body.indexOf("\"", passStart);
-  String password = (passStart > 12 && passEnd > passStart) ? body.substring(passStart, passEnd) : "";
+  String password = "";
+  if (passStart > 12 && passEnd > passStart && passEnd < body.length()) {
+    password = body.substring(passStart, passEnd);
+  }
   
   Serial.printf("\n[WIFI] Saving credentials: '%s'\n", ssid.c_str());
   
